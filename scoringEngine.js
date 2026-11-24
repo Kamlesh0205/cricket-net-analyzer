@@ -55,6 +55,28 @@ class ScoringEngine {
      * @param {Object} trajectory - Output from simulateTrajectory()
      * @param {Array} fielders - Array of { id, name, x, y } in meters from batsman
      */
+
+    findNearestFielder(trajectory, fielders) {
+     let minFielderTime = Infinity;
+     let nearestFielder = null;
+
+     const ratio = trajectory.totalDistance > this.boundaryRadius
+         ? this.boundaryRadius / trajectory.totalDistance
+         : 1;
+     const targetX = trajectory.finalPos.x * ratio;
+     const targetY = trajectory.finalPos.y * ratio;
+
+     for (const f of fielders) {
+         const sprintTime = Math.hypot(f.x - targetX, f.y - targetY) / this.fielderSpeed;
+         if (sprintTime < minFielderTime) {
+             minFielderTime = sprintTime;
+             nearestFielder = f;
+         }
+     }
+     return { minFielderTime, nearestFielder };
+ }
+
+
     evaluateShot(trajectory, fielders) {
         // 1. Check Boundary Six (clears boundary on the full)
         if (trajectory.carryDistance >= this.boundaryRadius) {
@@ -78,25 +100,7 @@ class ScoringEngine {
         }
 
         // 3. Check Boundary Four (rolls past boundary before fielder intercepts)
-        let minFielderTime = Infinity;
-        let nearestFielder = null;
-
-        for (const f of fielders) {
-            // Distance from fielder to the point where ball stops (or crosses boundary)
-            const targetX = trajectory.totalDistance > this.boundaryRadius
-                ? (trajectory.finalPos.x * (this.boundaryRadius / trajectory.totalDistance))
-                : trajectory.finalPos.x;
-            const targetY = trajectory.totalDistance > this.boundaryRadius
-                ? (trajectory.finalPos.y * (this.boundaryRadius / trajectory.totalDistance))
-                : trajectory.finalPos.y;
-
-            const distToBall = Math.hypot(f.x - targetX, f.y - targetY);
-            const sprintTime = distToBall / this.fielderSpeed;
-            if (sprintTime < minFielderTime) {
-                minFielderTime = sprintTime;
-                nearestFielder = f;
-            }
-        }
+        const { minFielderTime, nearestFielder } = this.findNearestFielder(trajectory, fielders);
 
 const effectiveDist = Math.min(trajectory.totalDistance, this.boundaryRadius);
         const ballTravelTime = trajectory.flightTime + Math.max(0, effectiveDist - trajectory.carryDistance) / 14;
