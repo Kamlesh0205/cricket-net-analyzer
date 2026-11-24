@@ -16,7 +16,7 @@ class VisionTracker {
         this.prevData = null;
         this.trail = []; // Stores { x, y, t } in normalized 0..1 coordinates
         this.cooldownUntil = 0;
-        this.ballColor = 'tennis';
+        this.ballColor = 'any';
         this.customHSV = null;
         this.statusText = 'CAMERA OFF';
 
@@ -101,6 +101,7 @@ class VisionTracker {
     }
 
     isBallPixel(r, g, b) {
+        if (this.ballColor === 'any') return true;
         const { h, s, v } = this.rgbToHsv(r, g, b);
 
         if (this.ballColor === 'custom' && this.customHSV) {

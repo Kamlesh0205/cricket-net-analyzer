@@ -26,7 +26,13 @@ h2 { margin: 0; font-size: 1.05rem; color: #e2e8f0; }
 .hint { font-size: 0.8rem; color: #94a3b8; margin: 0 0 10px 0; }
 
 .camera-box { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 8px; overflow: hidden; }
-#cameraVideo { display: none; }
+#cameraVideo {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
 #visionCanvas { width: 100%; height: 100%; object-fit: cover; }
 
 #fieldCanvas {
