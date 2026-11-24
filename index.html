@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CricNet AI — Real-Time Net Shot & Run Predictor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="scoreboard">
+        <div class="score-main">
+            <span id="runsDisplay">0</span>/<span id="wicketsDisplay">0</span>
+            <small>(<span id="oversDisplay">0.0</span> / <span id="maxOversDisplay">5</span> Ov)</small>
+        </div>
+        <div class="score-meta">
+            <span>Wickets Left: <strong id="wicketsLeftDisplay">3</strong></span>
+            <span>Last Shot: <strong id="lastDistanceDisplay">-- m</strong></span>
+        </div>
+    </header>
+
+    <div id="eventBanner" class="banner">Ready — Mount phone on tripod & start camera, or click field to test shot</div>
+
+    <main class="grid-layout">
+        <!-- Left Panel: Real-Time Tripod Camera -->
+        <section class="card">
+            <div class="card-header">
+                <h2>1. Tripod Camera Feed</h2>
+                <select id="ballTypeSelect">
+                    <option value="tennis">Neon Tennis Ball</option>
+                    <option value="red">Red Leather Ball</option>
+                    <option value="white">White Ball</option>
+                </select>
+            </div>
+            <div class="camera-box">
+                <video id="cameraVideo" playsinline muted></video>
+                <canvas id="visionCanvas"></canvas>
+            </div>
+            <div class="btn-row">
+                <button id="startCamBtn" class="btn primary">Start Rear Camera</button>
+                <button id="simShotBtn" class="btn secondary">Simulate Random Shot</button>
+            </div>
+        </section>
+
+        <!-- Right Panel: Interactive Field & Wagon Wheel -->
+        <section class="card">
+            <div class="card-header">
+                <h2>2. Virtual Ground & Field Setup</h2>
+                <select id="fieldPresetSelect">
+                    <option value="standard">Balanced Field (9 Fielders)</option>
+                    <option value="attacking">Attacking Ring (Slips/Catching)</option>
+                    <option value="death">Death Overs (Boundary Protection)</option>
+                </select>
+            </div>
+            <p class="hint">Drag any blue fielder dot to reposition. Click anywhere on the grass to test a manual shot!</p>
+            <canvas id="fieldCanvas" width="380" height="380"></canvas>
+        </section>
+
+        <!-- Bottom Panel: Match Settings & Shot Log -->
+        <section class="card full-width">
+            <h2>3. Match Settings & Ball-by-Ball Telemetry</h2>
+            <div class="settings-row">
+                <label>Max Overs: <input type="number" id="inputOvers" value="5" min="1" max="50"></label>
+                <label>Max Wickets: <input type="number" id="inputWickets" value="3" min="1" max="10"></label>
+                <label>Boundary (m): <input type="number" id="inputBoundary" value="65" min="30" max="90"></label>
+                <button id="resetMatchBtn" class="btn danger">Apply & Reset Innings</button>
+            </div>
+            <ul id="shotLog" class="shot-log"></ul>
+        </section>
+    </main>
+
+    <script src="scoringEngine.js"></script>
+    <script src="visionTracker.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
