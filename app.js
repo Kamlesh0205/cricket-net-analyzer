@@ -167,7 +167,7 @@ fieldCanvas.addEventListener('pointerdown', e => {
 
     for (const f of activeFielders) {
         const pos = metersToCanvas(f.x, f.y);
-        if (Math.hypot(pos.x - px, pos.y - py) < 16) {
+        if (Math.hypot(pos.x - px, pos.y - py) < 22) {
             draggingFielder = f;
             return;
         }
