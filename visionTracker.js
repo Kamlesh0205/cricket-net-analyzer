@@ -3,65 +3,85 @@ class VisionTracker {
     constructor(videoEl, overlayCanvas, onShotDetected) {
         this.video = videoEl;
         this.canvas = overlayCanvas;
-        this.ctx = overlayCanvas.getContext('2d', { willReadFrequently: true });
+        this.ctx = overlayCanvas.getContext('2d');
         this.onShotDetected = onShotDetected;
 
-        this.isRunning = false;
-        this.prevFrame = null;
-        this.ballHistory = [];
-        this.cooldown = false;
-        this.ballColor = 'tennis'; // 'tennis' | 'red' | 'white' | 'custom'
-        this.customHSV = null;
-        this.pixelsPerMeter = 45;
+        // Offscreen fast processing canvas (160x120 = 16x faster 60fps mobile tracking)
+        this.procCanvas = document.createElement('canvas');
+        this.procCanvas.width = 160;
+        this.procCanvas.height = 120;
+        this.procCtx = this.procCanvas.getContext('2d', { willReadFrequently: true });
 
-        // Allow user to tap the ball on camera feed to lock its exact color
+        this.isRunning = false;
+        this.prevData = null;
+        this.trail = []; // Stores { x, y, t } in normalized 0..1 coordinates
+        this.cooldownUntil = 0;
+        this.ballColor = 'tennis';
+        this.customHSV = null;
+        this.statusText = 'CAMERA OFF';
+
+        // Tap anywhere on the live video to lock onto the exact ball color
         this.canvas.addEventListener('pointerdown', (e) => {
             if (!this.isRunning) return;
             const rect = this.canvas.getBoundingClientRect();
-            const x = Math.floor((e.clientX - rect.left) * (this.canvas.width / rect.width));
-            const y = Math.floor((e.clientY - rect.top) * (this.canvas.height / rect.height));
-            const pixel = this.ctx.getImageData(x, y, 1, 1).data;
-            this.customHSV = this.rgbToHsv(pixel[0], pixel[1], pixel[2]);
+            const nx = (e.clientX - rect.left) / rect.width;
+            const ny = (e.clientY - rect.top) / rect.height;
+
+            const px = Math.min(159, Math.max(0, Math.floor(nx * 160)));
+            const py = Math.min(119, Math.max(0, Math.floor(ny * 120)));
+
+            // Sample a 3x3 patch around tap for accurate color lock
+            const patch = this.procCtx.getImageData(Math.max(0, px - 1), Math.max(0, py - 1), 3, 3).data;
+            let r = 0, g = 0, b = 0, n = patch.length / 4;
+            for (let i = 0; i < patch.length; i += 4) {
+                r += patch[i]; g += patch[i + 1]; b += patch[i + 2];
+            }
+            this.customHSV = this.rgbToHsv(r / n, g / n, b / n);
             this.ballColor = 'custom';
-            alert(`Locked onto ball color! Hue: ${Math.round(this.customHSV.h)}°`);
+            this.statusText = `LOCKED CUSTOM BALL (H:${Math.round(this.customHSV.h)}°)`;
         });
     }
 
     async startCamera() {
         if (this.isRunning) return;
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: {
-                facingMode: { ideal: 'environment' },
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                frameRate: { ideal: 60 }
-            }
-        });
-        this.video.srcObject = stream;
-        await this.video.play();
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: {
+                    facingMode: { ideal: 'environment' },
+                    width: { ideal: 640 },
+                    height: { ideal: 480 },
+                    frameRate: { ideal: 60 }
+                }
+            });
+            this.video.srcObject = stream;
+            await this.video.play();
 
-        this.canvas.width = this.video.videoWidth || 640;
-        this.canvas.height = this.video.videoHeight || 480;
-        this.prevFrame = null;
-        this.ballHistory = [];
-        this.isRunning = true;
-        this.processLoop();
+            this.canvas.width = this.video.videoWidth || 640;
+            this.canvas.height = this.video.videoHeight || 480;
+            this.prevData = null;
+            this.trail = [];
+            this.isRunning = true;
+            this.statusText = 'SCANNING — TAP BALL TO LOCK COLOR';
+            this.loop();
+        } catch (err) {
+            alert('Camera Error: ' + err.message + '. Ensure HTTPS and camera permission are allowed.');
+        }
     }
 
     stopCamera() {
         this.isRunning = false;
-        this.ballHistory = [];
-        this.prevFrame = null;
+        this.trail = [];
+        this.prevData = null;
         if (this.video.srcObject) {
             this.video.srcObject.getTracks().forEach(t => t.stop());
             this.video.srcObject = null;
         }
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     }
 
     setBallType(type) {
         this.ballColor = type;
+        this.statusText = `MODE: ${type.toUpperCase()} BALL`;
     }
 
     rgbToHsv(r, g, b) {
@@ -71,7 +91,6 @@ class VisionTracker {
         let h = 0;
         const s = max === 0 ? 0 : d / max;
         const v = max;
-
         if (max !== min) {
             if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
             else if (max === g) h = (b - r) / d + 2;
@@ -81,155 +100,152 @@ class VisionTracker {
         return { h, s, v };
     }
 
-    matchesBallColor(r, g, b) {
+    isBallPixel(r, g, b) {
         const { h, s, v } = this.rgbToHsv(r, g, b);
 
         if (this.ballColor === 'custom' && this.customHSV) {
-            const hueDiff = Math.min(Math.abs(h - this.customHSV.h), 360 - Math.abs(h - this.customHSV.h));
-            return hueDiff < 22 && s > 0.25 && v > 0.25;
+            const dh = Math.min(Math.abs(h - this.customHSV.h), 360 - Math.abs(h - this.customHSV.h));
+            return dh < 28 && s > 0.20 && v > 0.20;
         }
         if (this.ballColor === 'tennis') {
-            // Yellow-Green Neon Tennis Ball (Hue 45° to 95°)
-            return h >= 42 && h <= 98 && s > 0.35 && v > 0.35;
+            // Broad fluorescent yellow/green range for indoor & outdoor light
+            return h >= 38 && h <= 105 && s > 0.28 && v > 0.30;
         }
         if (this.ballColor === 'red') {
-            // Red Leather Ball (Hue 340°..360° or 0°..20°)
-            return (h <= 20 || h >= 340) && s > 0.40 && v > 0.25;
+            // Red/Maroon cricket ball
+            return (h <= 25 || h >= 335) && s > 0.32 && v > 0.20;
         }
-        // White Ball (Low saturation, high brightness)
-        return s < 0.22 && v > 0.78;
+        // White ball
+        return s < 0.25 && v > 0.72;
     }
 
-    processLoop() {
+    loop() {
         if (!this.isRunning) return;
 
-        const w = this.canvas.width;
-        const h = this.canvas.height;
-        this.ctx.drawImage(this.video, 0, 0, w, h);
+        const cw = this.canvas.width;
+        const ch = this.canvas.height;
 
-        const frame = this.ctx.getImageData(0, 0, w, h);
-        const data = frame.data;
+        // 1. Draw full-res video to visible canvas
+        this.ctx.drawImage(this.video, 0, 0, cw, ch);
 
-        // Define Batting Crease Zone (bottom-center where batsman stands)
-        const batZone = { xMin: w * 0.25, xMax: w * 0.75, yMin: h * 0.45, yMax: h * 0.92 };
-        this.ctx.strokeStyle = 'rgba(0, 255, 136, 0.5)';
-        this.ctx.lineWidth = 2;
-        this.ctx.strokeRect(batZone.xMin, batZone.yMin, batZone.xMax - batZone.xMin, batZone.yMax - batZone.yMin);
+        // 2. Draw downsampled 160x120 frame for ultra-fast pixel analysis
+        this.procCtx.drawImage(this.video, 0, 0, 160, 120);
+        const currData = this.procCtx.getImageData(0, 0, 160, 120).data;
 
-        if (this.prevFrame && !this.cooldown) {
-            let ballSumX = 0, ballSumY = 0, ballPixels = 0;
-            let batMinX = w, batMaxX = 0, batMinY = h, batMaxY = 0, batMotionPixels = 0;
+        const now = performance.now();
 
-            for (let y = 0; y < h; y += 2) {
-                for (let x = 0; x < w; x += 2) {
-                    const i = (y * w + x) * 4;
-                    const diff = Math.abs(data[i] - this.prevFrame[i]) +
-                                 Math.abs(data[i + 1] - this.prevFrame[i + 1]) +
-                                 Math.abs(data[i + 2] - this.prevFrame[i + 2]);
+        if (this.prevData && now > this.cooldownUntil) {
+            let sumX = 0, sumY = 0, count = 0;
 
-                    if (diff > 75) {
-                        // 1. Track Ball Pixels (moving + matches ball HSV color)
-                        if (this.matchesBallColor(data[i], data[i + 1], data[i + 2])) {
-                            ballSumX += x;
-                            ballSumY += y;
-                            ballPixels++;
-                        }
-                        // 2. Track Batsman Motion inside the Batting Crease Zone
-                        else if (x >= batZone.xMin && x <= batZone.xMax && y >= batZone.yMin && y <= batZone.yMax) {
-                            batMotionPixels++;
-                            if (x < batMinX) batMinX = x;
-                            if (x > batMaxX) batMaxX = x;
-                            if (y < batMinY) batMinY = y;
-                            if (y > batMaxY) batMaxY = y;
-                        }
+            for (let y = 0; y < 120; y++) {
+                for (let x = 0; x < 160; x++) {
+                    const idx = (y * 160 + x) * 4;
+                    const motion = Math.abs(currData[idx] - this.prevData[idx]) +
+                                   Math.abs(currData[idx + 1] - this.prevData[idx + 1]) +
+                                   Math.abs(currData[idx + 2] - this.prevData[idx + 2]);
+
+                    // Lower motion threshold (45) catches fast small balls even with motion blur
+                    if (motion > 45 && this.isBallPixel(currData[idx], currData[idx + 1], currData[idx + 2])) {
+                        sumX += x;
+                        sumY += y;
+                        count++;
                     }
                 }
             }
 
-            // Draw Batsman Tracking Box when batsman moves/swings
-            if (batMotionPixels > 80) {
-                this.ctx.strokeStyle = '#facc15';
-                this.ctx.lineWidth = 2;
-                this.ctx.strokeRect(batMinX, batMinY, batMaxX - batMinX, batMaxY - batMinY);
-                this.ctx.fillStyle = '#facc15';
-                this.ctx.font = '12px sans-serif';
-                this.ctx.fillText('BATSMAN', batMinX, Math.max(14, batMinY - 4));
-            }
+            // On 160x120 grid, a ball is 3 to 180 pixels
+            if (count >= 3 && count <= 180) {
+                const nx = (sumX / count) / 160;
+                const ny = (sumY / count) / 120;
 
-            // Draw Ball Reticle only for compact ball-sized blobs (prevents net/background false triggers)
-            if (ballPixels >= 10 && ballPixels <= 500) {
-                const cx = ballSumX / ballPixels;
-                const cy = ballSumY / ballPixels;
-                const now = performance.now();
-
-                this.ctx.beginPath();
-                this.ctx.arc(cx, cy, 12, 0, Math.PI * 2);
-                this.ctx.strokeStyle = '#ef4444';
-                this.ctx.lineWidth = 3;
-                this.ctx.stroke();
-
-                this.trackVector(cx, cy, now, batMotionPixels > 40);
-            } else if (this.ballHistory.length > 0 && performance.now() - this.ballHistory[this.ballHistory.length - 1].t > 350) {
-                // Clear stale tracking points if ball disappears for >350ms
-                this.ballHistory = [];
+                // Filter out teleporting noise jumps (> 35% of screen in 1 frame)
+                const last = this.trail[this.trail.length - 1];
+                if (!last || Math.hypot(nx - last.x, ny - last.y) < 0.35) {
+                    this.trail.push({ x: nx, y: ny, t: now });
+                    if (this.trail.length > 12) this.trail.shift();
+                    this.statusText = `TRACKING BALL (${count} px)`;
+                    this.analyzeTrajectory();
+                }
+            } else if (this.trail.length > 0 && now - this.trail[this.trail.length - 1].t > 300) {
+                this.trail = [];
+                this.statusText = 'SCANNING — READY FOR DELIVERY';
             }
         }
 
-        // Draw Ball Trail
-        if (this.ballHistory.length > 1) {
+        // Draw live ball trail & target reticle on main canvas
+        if (this.trail.length > 0) {
             this.ctx.beginPath();
-            this.ctx.moveTo(this.ballHistory[0].x, this.ballHistory[0].y);
-            for (let k = 1; k < this.ballHistory.length; k++) {
-                this.ctx.lineTo(this.ballHistory[k].x, this.ballHistory[k].y);
+            this.ctx.moveTo(this.trail[0].x * cw, this.trail[0].y * ch);
+            for (let i = 1; i < this.trail.length; i++) {
+                this.ctx.lineTo(this.trail[i].x * cw, this.trail[i].y * ch);
             }
             this.ctx.strokeStyle = '#38bdf8';
+            this.ctx.lineWidth = 4;
+            this.ctx.stroke();
+
+            const tip = this.trail[this.trail.length - 1];
+            this.ctx.beginPath();
+            this.ctx.arc(tip.x * cw, tip.y * ch, 16, 0, Math.PI * 2);
+            this.ctx.strokeStyle = '#ef4444';
             this.ctx.lineWidth = 3;
             this.ctx.stroke();
         }
 
-        this.prevFrame = new Uint8ClampedArray(data);
-        requestAnimationFrame(() => this.processLoop());
+        // Draw HUD Status Bar on top of camera feed so you always know what it sees
+        this.ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+        this.ctx.fillRect(0, 0, cw, 30);
+        this.ctx.fillStyle = now < this.cooldownUntil ? '#facc15' : '#4ade80';
+        this.ctx.font = 'bold 13px sans-serif';
+        this.ctx.fillText(now < this.cooldownUntil ? 'SHOT RECORDED — NEXT BALL IN 3s' : this.statusText, 10, 20);
+
+        this.prevData = new Uint8ClampedArray(currData);
+        requestAnimationFrame(() => this.loop());
     }
 
-    trackVector(x, y, t, batsmanActive) {
-        this.ballHistory.push({ x, y, t });
-        if (this.ballHistory.length > 10) this.ballHistory.shift();
+    analyzeTrajectory() {
+        if (this.trail.length < 4) return;
 
-        // Require at least 5 consecutive tracked points so random noise NEVER triggers runs
-        if (this.ballHistory.length >= 5) {
-            const p1 = this.ballHistory[this.ballHistory.length - 5];
-            const p2 = this.ballHistory[this.ballHistory.length - 3];
-            const p3 = this.ballHistory[this.ballHistory.length - 2];
-            const p4 = this.ballHistory[this.ballHistory.length - 1];
+        // Compare incoming vector (p0 -> p1) vs outgoing vector (p2 -> p3)
+        const p0 = this.trail[0];
+        const p1 = this.trail[Math.floor(this.trail.length / 2)];
+        const p2 = this.trail[this.trail.length - 2];
+        const p3 = this.trail[this.trail.length - 1];
 
-            // Delivery comes DOWN towards batsman (vyIncoming > 6 px/frame)
-            // Shot leaves UP/OUT off the bat (vyOutgoing < -10 px/frame)
-            const vyIncoming = p2.y - p1.y;
-            const vyOutgoing = p4.y - p3.y;
+        const v1x = p1.x - p0.x;
+        const v1y = p1.y - p0.y;
+        const v2x = p3.x - p2.x;
+        const v2y = p3.y - p2.y;
 
-            if (vyIncoming > 6 && vyOutgoing < -10 && batsmanActive) {
-                const dt = Math.max(0.016, (p4.t - p3.t) / 1000);
-                const dx = p4.x - p3.x;
-                const dy = p3.y - p4.y;
+        const mag1 = Math.hypot(v1x, v1y);
+        const mag2 = Math.hypot(v2x, v2y);
 
-                const pixelSpeed = Math.hypot(dx, dy) / dt;
-                const speedMs = Math.min(40, Math.max(18, (pixelSpeed / this.pixelsPerMeter) * 1.35));
-                const azimuthDeg = Math.round((Math.atan2(dx, dy) * 180) / Math.PI);
-                const elevationDeg = Math.min(55, Math.max(5, Math.round((dy / (Math.abs(dx) + dy + 1)) * 42)));
+        if (mag1 < 0.03 || mag2 < 0.03) return; // Ignore tiny jitters
 
-                this.triggerCooldown();
-                this.onShotDetected({
-                    speedMs: Math.round(speedMs * 10) / 10,
-                    azimuthDeg,
-                    elevationDeg
-                });
-            }
+        // Dot product checks angle change between incoming ball and hit shot
+        const cosAngle = (v1x * v2x + v1y * v2y) / (mag1 * mag2);
+
+        // If direction reverses or deflects sharply (> 75 degrees, cosAngle < 0.25)
+        if (cosAngle < 0.25) {
+            const dt = Math.max(0.016, (p3.t - p2.t) / 1000);
+            const normSpeed = mag2 / dt; // screen-widths per second
+
+            // Map screen-widths/sec (0.5 to 3.5) to realistic bat exit speed (18 to 40 m/s)
+            const speedMs = Math.min(40, Math.max(18, 15 + normSpeed * 8.5));
+
+            // Azimuth angle based on horizontal screen exit direction (-90 leg side to +90 off side)
+            const azimuthDeg = Math.round((Math.atan2(v2x, -v2y) * 180) / Math.PI);
+
+            // Elevation inferred from upward launch component
+            const upwardRatio = Math.max(0, -v2y / mag2);
+            const elevationDeg = Math.min(52, Math.max(6, Math.round(upwardRatio * 45)));
+
+            this.cooldownUntil = performance.now() + 3000;
+            this.trail = [];
+            this.onShotDetected({
+                speedMs: Math.round(speedMs * 10) / 10,
+                azimuthDeg,
+                elevationDeg
+            });
         }
-    }
-
-    triggerCooldown() {
-        this.cooldown = true;
-        this.ballHistory = [];
-        setTimeout(() => { this.cooldown = false; }, 3000);
     }
 }
